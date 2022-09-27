@@ -5,7 +5,8 @@ Trusted Advisor(TA) inspects your AWS environment, and then makes recommendation
 ## Solution Overview
 The following diagram illustrates how the solution works:
 
-![TA-Asana-Arch.png](./TA-Asana-Arch.png)
+![TA-Asana-Arch](https://user-images.githubusercontent.com/108042843/192427607-be22d5a8-e099-4cee-9ed1-03530513ff7d.png)
+
 
 ## Prerequisites
 Create a Personal Access Token and a project in Asana where you would like the task to be created. Personal Access Tokens (PATs) are a useful mechanism for accessing the API in scenarios where OAuth would be considered overkill, such as access from the command line and personal scripts or applications. 
