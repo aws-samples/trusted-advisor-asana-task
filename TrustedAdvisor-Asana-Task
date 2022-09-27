@@ -1,0 +1,84 @@
+##############################
+import boto3           
+import json
+import urllib.parse
+import urllib.request
+import urllib
+
+def lambda_handler(event, context):
+  
+  client = boto3.client('support', region_name='us-east-1')
+  response = client.describe_trusted_advisor_checks(language='en') 
+
+  ## Number of elements returned
+  num_checks = len(response['checks'])
+
+  ## Create List of TA CheckIds
+  check_ids = []
+  ta_checks_dict = {}
+  for x in range(num_checks):
+      check_ids.append(response['checks'][x]['id'])
+      
+      ## Store TA Checks in nested dict for cross referencing via TA check Id
+      ta_checks_dict[response['checks'][x]['id']] = {"name":response['checks'][x]['name'],"category":response['checks'][x]['category']}
+
+  ## Get TA Check Summaries
+  result = client.describe_trusted_advisor_check_summaries(checkIds=check_ids)
+
+  count_ok = 0
+  count_critical = 0
+  count_warn = 0
+  message = ""
+  summary = ""
+
+  for x in range(len(result['summaries'])):
+      check_status = result['summaries'][x]['status']
+      check_id = result['summaries'][x]['checkId']
+
+      ## Can't use match/case. Use If/else as Python 3.10 runtime not supported in Lambda. 
+      
+      if(check_status == 'ok'):
+        count_ok += 1
+      elif(check_status == 'warning'):
+        count_warn += 1
+      elif(check_status == 'error'):
+        count_critical += 1
+        message += "HIGH RISK  - " + "[" + str(ta_checks_dict[check_id]['category'])+ "] " + str(ta_checks_dict[check_id]['name']) + '\\n'
+      else:
+        continue
+
+  
+  summary += "\\n========= Summary of Trusted Advisor Findings =======\\n"
+  summary += "GREEN - OK = " + str(count_ok)  + "\\n"
+  summary += "YELLOW (Investigate) = " + str(count_warn)  + "\\n"
+  summary += "RED (High Risk) = " + str(count_critical)  + "\\n"
+
+  ## Create a task in a project
+  headers = {}
+  
+  ## Populate the header with the personal access token created
+  headers['Authorization'] = "" + event['AccessToken']
+  headers['Content-Type'] = "application/json"
+  headers['Accept'] = "application/json"
+
+  ## Add the data as per the Asana create tasks API
+  asana_taskcreation_url = "https://app.asana.com/api/1.0/tasks"
+  data = '{"data": {"name":"Trusted Advisor Recommendations","notes":"' + summary + message + '","projects":["' + event['Project'] + '"]} }'
+  data = data.encode('ascii')
+
+  
+  ## NOT USING Python "requests" library to avoid creating Lambda Layer in CloudFormation. Preserve CF portability
+  #response = requests.post(asana_taskcreation_url, headers=headers, data=data)
+
+  ## USING Python "urllib" instead
+  ## Send the request
+  req = urllib.request.Request(asana_taskcreation_url, data=data, headers=headers)
+  resp = urllib.request.urlopen(req)
+  print(resp.read())   
+  
+  return {
+    'statusCode': 200
+  }
+
+
+##############################

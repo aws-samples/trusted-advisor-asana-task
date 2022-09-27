@@ -1,0 +1,152 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Parameters:
+  ScheduleExpression:
+    Type: String
+    Description: "Enter an interval for the scheduler to run, e.g. every 12 hours, etc., or a EventBridge cron job pattern"
+    Default: "rate(12 hours)"
+  LambdaInputJSON:
+    Type: String
+    Description: Input JSON to the Lambda
+    Default: '{"AccessToken": "<Replace with the AccessToken you created>", "Project": "<Replace with the Asana Project id to create a task>"}'
+
+Resources:
+  LambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: index.lambda_handler
+      Description: Lambda function to send status of Trusted Advisor checks to Asana
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Runtime: python3.9
+      Timeout: 30
+      Code:
+        ZipFile: |
+          ##############################
+          import boto3           
+          import json
+          import urllib.parse
+          import urllib.request
+          import urllib
+
+          def lambda_handler(event, context):
+            
+            client = boto3.client('support', region_name='us-east-1')
+            response = client.describe_trusted_advisor_checks(language='en') 
+
+            ## Number of elements returned
+            num_checks = len(response['checks'])
+
+            ## Create List of TA CheckIds
+            check_ids = []
+            ta_checks_dict = {}
+            for x in range(num_checks):
+                check_ids.append(response['checks'][x]['id'])
+                
+                ## Store TA Checks in nested dict for cross referencing via TA check Id
+                ta_checks_dict[response['checks'][x]['id']] = {"name":response['checks'][x]['name'],"category":response['checks'][x]['category']}
+
+            ## Get TA Check Summaries
+            result = client.describe_trusted_advisor_check_summaries(checkIds=check_ids)
+
+            count_ok = 0
+            count_critical = 0
+            count_warn = 0
+            message = ""
+            summary = ""
+
+            for x in range(len(result['summaries'])):
+                check_status = result['summaries'][x]['status']
+                check_id = result['summaries'][x]['checkId']
+
+                ## Can't use match/case. Use If/else as Python 3.10 runtime not supported in Lambda. 
+                
+                if(check_status == 'ok'):
+                  count_ok += 1
+                elif(check_status == 'warning'):
+                  count_warn += 1
+                elif(check_status == 'error'):
+                  count_critical += 1
+                  message += "HIGH RISK  - " + "[" + str(ta_checks_dict[check_id]['category'])+ "] " + str(ta_checks_dict[check_id]['name']) + '\\n'
+                else:
+                  continue
+
+            
+            summary += "\\n========= Summary of Trusted Advisor Findings =======\\n"
+            summary += "GREEN - OK = " + str(count_ok)  + "\\n"
+            summary += "YELLOW (Investigate) = " + str(count_warn)  + "\\n"
+            summary += "RED (High Risk) = " + str(count_critical)  + "\\n"
+
+            ## Create a task in a project
+            headers = {}
+            
+            ## Populate the header with the personal access token created
+            headers['Authorization'] = "" + event['AccessToken']
+            headers['Content-Type'] = "application/json"
+            headers['Accept'] = "application/json"
+
+            ## Add the data as per the Asana create tasks API
+            asana_taskcreation_url = "https://app.asana.com/api/1.0/tasks"
+            data = '{"data": {"name":"Trusted Advisor Recommendations","notes":"' + summary + message + '","projects":["' + event['Project'] + '"]} }'
+            data = data.encode('ascii')
+
+            
+            ## NOT USING Python "requests" library to avoid creating Lambda Layer in CloudFormation. Preserve CF portability
+            #response = requests.post(asana_taskcreation_url, headers=headers, data=data)
+
+            ## USING Python "urllib" instead
+            ## Send the request
+            req = urllib.request.Request(asana_taskcreation_url, data=data, headers=headers)
+            resp = urllib.request.urlopen(req)
+            print(resp.read())   
+            
+            return {
+              'statusCode': 200
+            }
+
+
+          ##############################
+
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Description: Lambda Role to access Trusted Advisor
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/ReadOnlyAccess"
+        - "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: Allow-TA-Access
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "support:DescribeTrustedAdvisorCheckRefreshStatuses"
+                  - "support:DescribeTrustedAdvisorCheckResult"
+                  - "support:DescribeTrustedAdvisorCheckSummaries"
+                  - "support:DescribeTrustedAdvisorChecks"
+                Resource: "*"
+  ScheduledRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: Scheduler for Lambda Function - TrustedAdvisorAsanaTasks
+      ScheduleExpression: !Ref ScheduleExpression
+      State: "ENABLED"
+      Targets:
+        - Arn: !GetAtt LambdaFunction.Arn
+          Id: "TargetFunction"
+          Input: !Ref LambdaInputJSON 
+  InvokeLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt LambdaFunction.Arn
+      Action: "lambda:InvokeFunction"
+      Principal: "events.amazonaws.com"
+      SourceArn: !GetAtt ScheduledRule.Arn
